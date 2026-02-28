@@ -32,10 +32,8 @@ if (process.env.JWT_SECRET) {
   console.warn('WARNING: JWT_SECRET not set – tokens will be invalidated on restart.');
 }
 
-const AUTHORIZE_PASSWORD = process.env.AUTHORIZE_PASSWORD || '';
-if (!AUTHORIZE_PASSWORD) {
-  console.warn('WARNING: AUTHORIZE_PASSWORD not set – authorization page is unprotected!');
-}
+const BOOKSTACK_BASE_URL = (process.env.BOOKSTACK_BASE_URL || '').replace(/\/$/, '');
+const DEBUG = process.env.DEBUG === 'true';
 
 // ─── In-memory stores ─────────────────────────────────────────────────────────
 
@@ -96,16 +94,41 @@ app.get('/oauth/authorize', (req, res) => {
 
 // ─── OAuth: Issue authorization code ─────────────────────────────────────────
 
-app.post('/oauth/authorize', (req, res) => {
-  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, password } = req.body;
+app.post('/oauth/authorize', async (req, res) => {
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, bookstack_token } = req.body;
 
   if (!redirect_uri) return res.status(400).send('missing redirect_uri');
 
-  // Password check
-  if (AUTHORIZE_PASSWORD && password !== AUTHORIZE_PASSWORD) {
+  // Validate BookStack token live against the API
+  if (!bookstack_token) {
     return res.type('html').send(buildAuthorizePage({
       client_id, redirect_uri, state, code_challenge, code_challenge_method,
-      error: 'Invalid password.',
+      error: 'Please enter your BookStack API token.',
+    }));
+  }
+
+  try {
+    const apiUrl = BOOKSTACK_BASE_URL.replace(/\/api$/, '') + '/api/books?count=1';
+    if (DEBUG) console.log(`[auth] validating token against ${apiUrl}`);
+    const apiRes = await fetch(apiUrl, {
+      headers: { Authorization: `Token ${bookstack_token}` },
+    });
+    if (DEBUG) console.log(`[auth] BookStack responded: ${apiRes.status}`);
+    if (!apiRes.ok) {
+      if (DEBUG) {
+        const body = await apiRes.text().catch(() => '');
+        console.error(`[auth] token rejected: ${apiRes.status} ${body.slice(0, 200)}`);
+      }
+      return res.type('html').send(buildAuthorizePage({
+        client_id, redirect_uri, state, code_challenge, code_challenge_method,
+        error: 'Invalid BookStack API token. Please check your token and try again.',
+      }));
+    }
+  } catch (err) {
+    if (DEBUG) console.error(`[auth] fetch error: ${err.message}`);
+    return res.type('html').send(buildAuthorizePage({
+      client_id, redirect_uri, state, code_challenge, code_challenge_method,
+      error: 'Could not reach BookStack to validate the token. Please try again.',
     }));
   }
 
@@ -117,6 +140,7 @@ app.post('/oauth/authorize', (req, res) => {
     redirectUri:         redirect_uri,
     codeChallenge:       code_challenge,
     codeChallengeMethod: code_challenge_method || 'S256',
+    bookstackToken:      bookstack_token,
     expiresAt,
   });
   setTimeout(() => pendingCodes.delete(code), 600_000);
@@ -155,8 +179,8 @@ app.post('/oauth/token', async (req, res) => {
     }
 
     const [accessToken, refreshToken] = await Promise.all([
-      mintJwt({ sub: stored.clientId, type: 'access' },  '1h'),
-      mintJwt({ sub: stored.clientId, type: 'refresh' }, '30d'),
+      mintJwt({ sub: stored.clientId, type: 'access',  bst: stored.bookstackToken }, '1h'),
+      mintJwt({ sub: stored.clientId, type: 'refresh', bst: stored.bookstackToken }, '30d'),
     ]);
 
     return res.json({
@@ -173,7 +197,7 @@ app.post('/oauth/token', async (req, res) => {
       const { payload } = await jwtVerify(refresh_token, jwtSecret);
       if (payload.type !== 'refresh') throw new Error('wrong type');
 
-      const accessToken = await mintJwt({ sub: payload.sub, type: 'access' }, '1h');
+      const accessToken = await mintJwt({ sub: payload.sub, type: 'access', bst: payload.bst }, '1h');
       return res.json({
         access_token:  accessToken,
         token_type:    'bearer',
@@ -196,7 +220,8 @@ async function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   try {
-    await jwtVerify(auth.slice(7), jwtSecret);
+    const { payload } = await jwtVerify(auth.slice(7), jwtSecret);
+    req.bookstackToken = payload.bst;
     next();
   } catch {
     res.status(401).json({ error: 'invalid_token' });
@@ -205,20 +230,20 @@ async function requireAuth(req, res, next) {
 
 // ─── MCP: session factory ─────────────────────────────────────────────────────
 
-function spawnChild() {
+function spawnChild(token) {
   return spawn('bookstack-mcp-server', [], {
     env: {
-      PATH:                  process.env.PATH,
-      HOME:                  process.env.HOME,
-      BOOKSTACK_BASE_URL:    process.env.BOOKSTACK_BASE_URL || '',
-      BOOKSTACK_API_TOKEN:   process.env.BOOKSTACK_API_TOKEN || '',
+      PATH:                process.env.PATH,
+      HOME:                process.env.HOME,
+      BOOKSTACK_BASE_URL:  process.env.BOOKSTACK_BASE_URL || '',
+      BOOKSTACK_API_TOKEN: token,
     },
     stdio: ['pipe', 'pipe', 'inherit'], // stderr → host stderr for debugging
   });
 }
 
-function newMcpSession() {
-  const child = spawnChild();
+function newMcpSession(token) {
+  const child = spawnChild(token);
   let sessionId = null;
 
   const transport = new StreamableHTTPServerTransport({
@@ -285,7 +310,7 @@ app.all('/mcp', requireAuth, async (req, res) => {
       await session.transport.handleRequest(req, res, req.body);
     } else if (req.method === 'POST') {
       // First request — no session ID yet; create a new session
-      const session = newMcpSession();
+      const session = newMcpSession(req.bookstackToken);
       await session.transport.handleRequest(req, res, req.body);
     } else {
       res.status(400).json({ error: 'missing_session_id' });
@@ -399,9 +424,13 @@ function buildAuthorizePage({ client_id, redirect_uri, state, code_challenge, co
       <input type="hidden" name="state"                 value="${esc(state)}">
       <input type="hidden" name="code_challenge"        value="${esc(code_challenge)}">
       <input type="hidden" name="code_challenge_method" value="${esc(code_challenge_method)}">
-      <label for="password">Password</label>
+      <label for="bookstack_token">BookStack API Token</label>
       ${error ? `<div class="error">${esc(error)}</div>` : ''}
-      <input type="password" id="password" name="password" autofocus autocomplete="current-password">
+      <input type="password" id="bookstack_token" name="bookstack_token"
+             placeholder="tokenid:tokensecret" autofocus autocomplete="off">
+      <p style="font-size:0.78rem;color:#94a3b8;margin-top:-0.5rem;margin-bottom:1rem;">
+        Find your token in BookStack under <strong>Settings → API Tokens</strong>.
+      </p>
       <button type="submit">Allow Access</button>
     </form>
   </div>
