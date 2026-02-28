@@ -1,0 +1,26 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Add this service to your existing docker-compose.yml on the BookStack server.
+#
+# Required env vars:
+#   BOOKSTACK_BASE_URL   – e.g. https://bookstack.example.com/api
+#   BOOKSTACK_API_TOKEN  – token_id:token_secret  (same as used for Claude Desktop)
+#   JWT_SECRET           – generate with: openssl rand -base64 32
+#   BASE_URL             – public HTTPS URL of this service
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  bookstack-mcp:
+    build: /home/claude/bookstack-mcp   # or use image: after pushing to a registry
+    container_name: bookstack-mcp
+    environment:
+      - BOOKSTACK_BASE_URL=https://bookstack.cloud.01640.link/api
+      - BOOKSTACK_API_TOKEN=<token_id>:<token_secret>
+      - JWT_SECRET=<generate: openssl rand -base64 32>
+      - BASE_URL=https://mcp-bookstack.01640.link
+      - MCP_PORT=3100
+    ports:
+      - "127.0.0.1:3100:3100"
+    restart: unless-stopped
+    # Optional: share network with bookstack container if needed
+    # networks:
+    #   - bookstack_default
