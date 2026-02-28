@@ -135,9 +135,9 @@ docker build -t bookstack-mcp-remote .
 ## Security Notes
 
 - **Never commit `.env`** — it is listed in `.gitignore`
+- **AUTHORIZE_PASSWORD** protects the OAuth consent page — without it anyone who knows the URL can obtain a valid token. Generate with `openssl rand -base64 16`
 - **JWT_SECRET** must be set explicitly in production; a random key is generated on startup if not set, invalidating all tokens on restart
 - All tokens are signed with HS256; the secret never leaves the container
-- The consent page requires no login — it is designed for personal/single-user deployments
 
 ## License
 

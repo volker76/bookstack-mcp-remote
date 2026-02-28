@@ -32,6 +32,11 @@ if (process.env.JWT_SECRET) {
   console.warn('WARNING: JWT_SECRET not set – tokens will be invalidated on restart.');
 }
 
+const AUTHORIZE_PASSWORD = process.env.AUTHORIZE_PASSWORD || '';
+if (!AUTHORIZE_PASSWORD) {
+  console.warn('WARNING: AUTHORIZE_PASSWORD not set – authorization page is unprotected!');
+}
+
 // ─── In-memory stores ─────────────────────────────────────────────────────────
 
 const registeredClients = new Map(); // clientId → { redirectUris }
@@ -92,9 +97,17 @@ app.get('/oauth/authorize', (req, res) => {
 // ─── OAuth: Issue authorization code ─────────────────────────────────────────
 
 app.post('/oauth/authorize', (req, res) => {
-  const { client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.body;
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, password } = req.body;
 
   if (!redirect_uri) return res.status(400).send('missing redirect_uri');
+
+  // Password check
+  if (AUTHORIZE_PASSWORD && password !== AUTHORIZE_PASSWORD) {
+    return res.type('html').send(buildAuthorizePage({
+      client_id, redirect_uri, state, code_challenge, code_challenge_method,
+      error: 'Invalid password.',
+    }));
+  }
 
   const code      = randomBytes(32).toString('base64url');
   const expiresAt = Date.now() + 600_000; // 10 minutes
@@ -303,7 +316,7 @@ function esc(s) {
     .replace(/'/g,  '&#39;');
 }
 
-function buildAuthorizePage({ client_id, redirect_uri, state, code_challenge, code_challenge_method }) {
+function buildAuthorizePage({ client_id, redirect_uri, state, code_challenge, code_challenge_method, error }) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -338,8 +351,21 @@ function buildAuthorizePage({ client_id, redirect_uri, state, code_challenge, co
       margin-bottom: 1.25rem;
     }
     h1 { font-size: 1.1rem; font-weight: 600; color: #0f172a; margin-bottom: 0.5rem; }
-    p  { font-size: 0.875rem; color: #64748b; line-height: 1.6; margin-bottom: 1.75rem; }
+    p  { font-size: 0.875rem; color: #64748b; line-height: 1.6; margin-bottom: 1.25rem; }
     p strong { color: #0f172a; }
+    label { display: block; font-size: 0.8rem; font-weight: 500; color: #374151; margin-bottom: 0.35rem; }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      margin-bottom: 1rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="password"]:focus { border-color: #2563eb; }
+    .error { font-size: 0.8rem; color: #dc2626; margin-bottom: 0.75rem; }
     button {
       width: 100%;
       padding: 0.75rem;
@@ -368,11 +394,14 @@ function buildAuthorizePage({ client_id, redirect_uri, state, code_challenge, co
     <h1>Authorize BookStack MCP</h1>
     <p><strong>Claude.ai</strong> is requesting access to your BookStack knowledge base via the MCP protocol.</p>
     <form method="POST" action="/oauth/authorize">
-      <input type="hidden" name="client_id"            value="${esc(client_id)}">
-      <input type="hidden" name="redirect_uri"         value="${esc(redirect_uri)}">
-      <input type="hidden" name="state"                value="${esc(state)}">
-      <input type="hidden" name="code_challenge"       value="${esc(code_challenge)}">
+      <input type="hidden" name="client_id"             value="${esc(client_id)}">
+      <input type="hidden" name="redirect_uri"          value="${esc(redirect_uri)}">
+      <input type="hidden" name="state"                 value="${esc(state)}">
+      <input type="hidden" name="code_challenge"        value="${esc(code_challenge)}">
       <input type="hidden" name="code_challenge_method" value="${esc(code_challenge_method)}">
+      <label for="password">Password</label>
+      ${error ? `<div class="error">${esc(error)}</div>` : ''}
+      <input type="password" id="password" name="password" autofocus autocomplete="current-password">
       <button type="submit">Allow Access</button>
     </form>
   </div>
