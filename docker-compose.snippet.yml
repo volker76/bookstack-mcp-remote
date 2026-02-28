@@ -1,6 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Add this service to your existing docker-compose.yml on the BookStack server.
 #
+# Image: volkerhaensel/bookstack-mcp-remote:latest (Docker Hub)
+#
 # Required env vars:
 #   BOOKSTACK_BASE_URL   – e.g. https://bookstack.example.com/api
 #   BOOKSTACK_API_TOKEN  – token_id:token_secret  (same as used for Claude Desktop)
@@ -10,7 +12,7 @@
 
 services:
   bookstack-mcp:
-    build: /home/claude/bookstack-mcp   # or use image: after pushing to a registry
+    image: volkerhaensel/bookstack-mcp-remote:latest
     container_name: bookstack-mcp
     environment:
       - BOOKSTACK_BASE_URL=https://bookstack.cloud.01640.link/api
