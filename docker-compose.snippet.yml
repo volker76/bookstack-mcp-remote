@@ -3,8 +3,11 @@
 #
 # Image: volkerhaensel/bookstack-mcp-remote:latest (Docker Hub)
 #
+# Assumes bookstack-mcp runs in the same docker-compose as bookstack.
+# bookstack-mcp reaches bookstack directly via the internal Docker network
+# (http://bookstack:80) instead of going through the public URL.
+#
 # Required env vars:
-#   BOOKSTACK_BASE_URL   – e.g. https://bookstack.example.com/api
 #   BOOKSTACK_API_TOKEN  – token_id:token_secret  (same as used for Claude Desktop)
 #   JWT_SECRET           – generate with: openssl rand -base64 32
 #   BASE_URL             – public HTTPS URL of this service
@@ -15,7 +18,7 @@ services:
     image: volkerhaensel/bookstack-mcp-remote:latest
     container_name: bookstack-mcp
     environment:
-      - BOOKSTACK_BASE_URL=https://bookstack.cloud.01640.link/api
+      - BOOKSTACK_BASE_URL=http://bookstack:80/api
       - BOOKSTACK_API_TOKEN=<token_id>:<token_secret>
       - JWT_SECRET=<generate: openssl rand -base64 32>
       - BASE_URL=https://mcp-bookstack.01640.link
@@ -23,6 +26,5 @@ services:
     ports:
       - "127.0.0.1:3100:3100"
     restart: unless-stopped
-    # Optional: share network with bookstack container if needed
-    # networks:
-    #   - bookstack_default
+    depends_on:
+      - bookstack
