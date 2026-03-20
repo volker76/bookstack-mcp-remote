@@ -34,12 +34,13 @@ if (process.env.JWT_SECRET) {
 
 const BOOKSTACK_BASE_URL = (process.env.BOOKSTACK_BASE_URL || '').replace(/\/$/, '');
 const DEBUG = process.env.DEBUG === 'true';
+const SESSION_IDLE_TIMEOUT_MS = parseInt(process.env.SESSION_IDLE_TIMEOUT_MS || String(30 * 60 * 1000), 10);
 
 // ─── In-memory stores ─────────────────────────────────────────────────────────
 
 const registeredClients = new Map(); // clientId → { redirectUris }
 const pendingCodes      = new Map(); // code → { clientId, redirectUri, codeChallenge, codeChallengeMethod, expiresAt }
-const mcpSessions       = new Map(); // sessionId → { transport, child }
+const mcpSessions       = new Map(); // sessionId → { transport, child, resetIdleTimer }
 
 // ─── App setup ────────────────────────────────────────────────────────────────
 
@@ -257,7 +258,18 @@ function newMcpSession(token) {
     },
   });
 
-  const session = { transport, child };
+  // ── idle timeout ──
+  let idleTimer = null;
+  function resetIdleTimer() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      console.log(`[mcp] session idle for ${SESSION_IDLE_TIMEOUT_MS / 60000} min, killing session=${sessionId}`);
+      child.kill();
+    }, SESSION_IDLE_TIMEOUT_MS);
+  }
+  resetIdleTimer();
+
+  const session = { transport, child, resetIdleTimer };
 
   // ── child stdout → HTTP transport (line-delimited JSON) ──
   let buf = '';
@@ -283,12 +295,14 @@ function newMcpSession(token) {
   // ── cleanup ──
   child.on('exit', (code, signal) => {
     console.log(`[mcp] child exited (code=${code}, signal=${signal}) session=${sessionId}`);
+    if (idleTimer) clearTimeout(idleTimer);
     if (sessionId) mcpSessions.delete(sessionId);
     transport.close().catch(() => {});
   });
 
   transport.onclose = () => {
     console.log(`[mcp] transport closed, session=${sessionId}`);
+    if (idleTimer) clearTimeout(idleTimer);
     if (sessionId) mcpSessions.delete(sessionId);
     child.kill();
   };
@@ -307,6 +321,7 @@ app.all('/mcp', requireAuth, async (req, res) => {
       if (!session) {
         return res.status(404).json({ error: 'session_not_found' });
       }
+      session.resetIdleTimer();
       await session.transport.handleRequest(req, res, req.body);
     } else if (req.method === 'POST') {
       // First request — no session ID yet; create a new session
