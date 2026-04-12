@@ -408,9 +408,20 @@ app.all('/mcp', requireAuth, async (req, res) => {
       session.resetIdleTimer();
       await session.transport.handleRequest(req, res, req.body);
     } else if (req.method === 'POST') {
-      // First request — no session ID yet; create a new session
-      const session = await newMcpSession(req.bookstackToken);
+      // First request — no session ID yet; create a new session.
+      // If the client skips the initialize handshake (e.g. it has cached tool
+      // schemas from a previous connection), pre-initialize the child so the
+      // tool call succeeds immediately.
+      const isInitialize = req.body?.method === 'initialize';
+      const session = await newMcpSession(req.bookstackToken, { reconnect: !isInitialize });
       await session.transport.handleRequest(req, res, req.body);
+      if (!isInitialize) {
+        const newId = session.getSessionId();
+        if (newId && !mcpSessions.has(newId)) {
+          mcpSessions.set(newId, session);
+          console.log(`[mcp] new session (no-init path) registered: ${newId}`);
+        }
+      }
     } else {
       res.status(400).json({ error: 'missing_session_id' });
     }
