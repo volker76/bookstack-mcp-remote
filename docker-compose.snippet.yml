@@ -21,5 +21,13 @@ services:
     depends_on:
       - bookstack
 
+  watchtower-bookstack-mcp:
+    image: containrrr/watchtower:latest
+    container_name: watchtower-bookstack-mcp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 120 bookstack-mcp
+    restart: unless-stopped
+
 volumes:
   bookstack_config:
