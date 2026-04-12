@@ -331,7 +331,7 @@ async function newMcpSession(token, { reconnect = false } = {}) {
   }
   resetIdleTimer();
 
-  const session = { transport, child, resetIdleTimer, getSessionId: () => sessionId };
+  const session = { transport, child, resetIdleTimer, getSessionId: () => sessionId, setSessionId: (id) => { sessionId = id; } };
 
   // ── child stdout → HTTP transport (line-delimited JSON) ──
   let buf = '';
@@ -384,8 +384,7 @@ app.all('/mcp', requireAuth, async (req, res) => {
       if (!session) {
         // Session was lost (idle timeout, server restart, child crash).
         // Transparently rebuild: pre-initialize the child with the MCP
-        // handshake so it can handle tool calls immediately, then forward
-        // the pending request. The response will carry the new session ID.
+        // handshake so it can handle tool calls immediately.
         console.log(`[mcp] stale session ${sid}, rebuilding transparently`);
         try {
           session = await newMcpSession(req.bookstackToken, { reconnect: true });
@@ -393,35 +392,26 @@ app.all('/mcp', requireAuth, async (req, res) => {
           console.error('[mcp] session rebuild failed:', err.message);
           return res.status(503).json({ error: 'session_rebuild_failed', message: err.message });
         }
-        session.resetIdleTimer();
-        await session.transport.handleRequest(req, res, req.body);
-        // onsessioninitialized is only triggered by an initialize message from
-        // the client; for tool calls we register the new session manually.
-        const newId = session.getSessionId();
-        if (newId && !mcpSessions.has(newId)) {
-          mcpSessions.set(newId, session);
-          console.log(`[mcp] rebuilt session registered: ${newId}`);
-        }
-        return;
+        // The SDK transport only sets _initialized=true when it processes an
+        // initialize message through handleRequest. We bypass that by forcing
+        // the internal state directly, reusing the incoming (stale) session ID
+        // so validateSession() accepts the request without a new handshake.
+        const wt = session.transport._webStandardTransport;
+        wt._initialized = true;
+        wt.sessionId = sid;
+        session.setSessionId(sid); // keep closure in sync for cleanup handlers
+        mcpSessions.set(sid, session);
+        console.log(`[mcp] rebuilt session registered as: ${sid}`);
       }
 
       session.resetIdleTimer();
       await session.transport.handleRequest(req, res, req.body);
     } else if (req.method === 'POST') {
       // First request — no session ID yet; create a new session.
-      // If the client skips the initialize handshake (e.g. it has cached tool
-      // schemas from a previous connection), pre-initialize the child so the
-      // tool call succeeds immediately.
-      const isInitialize = req.body?.method === 'initialize';
-      const session = await newMcpSession(req.bookstackToken, { reconnect: !isInitialize });
+      // Claude.ai sends initialize first for fresh connections; the transport
+      // handles registration via onsessioninitialized automatically.
+      const session = await newMcpSession(req.bookstackToken);
       await session.transport.handleRequest(req, res, req.body);
-      if (!isInitialize) {
-        const newId = session.getSessionId();
-        if (newId && !mcpSessions.has(newId)) {
-          mcpSessions.set(newId, session);
-          console.log(`[mcp] new session (no-init path) registered: ${newId}`);
-        }
-      }
     } else {
       res.status(400).json({ error: 'missing_session_id' });
     }
