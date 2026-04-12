@@ -243,8 +243,70 @@ function spawnChild(token) {
   });
 }
 
-function newMcpSession(token) {
+/**
+ * Send MCP initialize/initialized to a freshly spawned child so it is ready
+ * to handle tool calls without a full client-driven handshake.
+ * Used when transparently rebuilding a lost session.
+ */
+function preInitChild(child) {
+  return new Promise((resolve, reject) => {
+    const initMsg = JSON.stringify({
+      jsonrpc: '2.0',
+      id: '__preinit__',
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'bookstack-mcp-proxy', version: '1.0.0' },
+      },
+    }) + '\n';
+
+    let buf = '';
+    const timer = setTimeout(() => {
+      child.stdout.removeListener('data', onData);
+      reject(new Error('pre-init timeout (5 s)'));
+    }, 5000);
+
+    function onData(chunk) {
+      buf += chunk.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id === '__preinit__') {
+            clearTimeout(timer);
+            child.stdout.removeListener('data', onData);
+            if (msg.error) {
+              reject(new Error(`pre-init error: ${msg.error.message}`));
+            } else {
+              child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+              resolve();
+            }
+            return;
+          }
+        } catch { /* ignore non-JSON lines */ }
+      }
+    }
+
+    child.stdout.on('data', onData);
+    child.stdin.write(initMsg);
+  });
+}
+
+async function newMcpSession(token, { reconnect = false } = {}) {
   const child = spawnChild(token);
+
+  if (reconnect) {
+    try {
+      await preInitChild(child);
+    } catch (err) {
+      child.kill();
+      throw err;
+    }
+  }
+
   let sessionId = null;
 
   const transport = new StreamableHTTPServerTransport({
@@ -269,7 +331,7 @@ function newMcpSession(token) {
   }
   resetIdleTimer();
 
-  const session = { transport, child, resetIdleTimer };
+  const session = { transport, child, resetIdleTimer, getSessionId: () => sessionId };
 
   // ── child stdout → HTTP transport (line-delimited JSON) ──
   let buf = '';
@@ -317,15 +379,37 @@ app.all('/mcp', requireAuth, async (req, res) => {
     const sid = req.headers['mcp-session-id'];
 
     if (sid) {
-      const session = mcpSessions.get(sid);
+      let session = mcpSessions.get(sid);
+
       if (!session) {
-        return res.status(404).json({ error: 'session_not_found' });
+        // Session was lost (idle timeout, server restart, child crash).
+        // Transparently rebuild: pre-initialize the child with the MCP
+        // handshake so it can handle tool calls immediately, then forward
+        // the pending request. The response will carry the new session ID.
+        console.log(`[mcp] stale session ${sid}, rebuilding transparently`);
+        try {
+          session = await newMcpSession(req.bookstackToken, { reconnect: true });
+        } catch (err) {
+          console.error('[mcp] session rebuild failed:', err.message);
+          return res.status(503).json({ error: 'session_rebuild_failed', message: err.message });
+        }
+        session.resetIdleTimer();
+        await session.transport.handleRequest(req, res, req.body);
+        // onsessioninitialized is only triggered by an initialize message from
+        // the client; for tool calls we register the new session manually.
+        const newId = session.getSessionId();
+        if (newId && !mcpSessions.has(newId)) {
+          mcpSessions.set(newId, session);
+          console.log(`[mcp] rebuilt session registered: ${newId}`);
+        }
+        return;
       }
+
       session.resetIdleTimer();
       await session.transport.handleRequest(req, res, req.body);
     } else if (req.method === 'POST') {
       // First request — no session ID yet; create a new session
-      const session = newMcpSession(req.bookstackToken);
+      const session = await newMcpSession(req.bookstackToken);
       await session.transport.handleRequest(req, res, req.body);
     } else {
       res.status(400).json({ error: 'missing_session_id' });
